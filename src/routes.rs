@@ -188,6 +188,39 @@ pub async fn get_lnurl_pay(
         ));
     }
 
+    let mut conn = state.db_pool.get().map_err(|e| {
+        error!("DB connection error: {e}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "ERROR",
+                "reason": "Server error",
+            })),
+        )
+    })?;
+
+    if User::get_by_name(&mut conn, &name)
+        .map_err(|e| {
+            error!("Error looking up user for LNURL metadata: {e:?}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "ERROR",
+                    "reason": "Server error",
+                })),
+            )
+        })?
+        .is_none()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "status": "ERROR",
+                "reason": "User not found",
+            })),
+        ));
+    }
+
     let metadata = calc_metadata(&name, &state.domain);
 
     let callback = format!("https://{}/get-invoice/{name}", state.domain);
