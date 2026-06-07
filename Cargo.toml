@@ -22,6 +22,7 @@ bitcoin = { version = "0.32.7", features = ["serde"] }
 clap = { version = "4.1.14", features = ["derive", "env"] }
 chrono = { version = "0.4.26", features = ["serde"] }
 diesel = { version = "2.1", features = ["postgres", "postgres_backend", "r2d2", "chrono", "numeric"] }
+diesel_migrations = "2.1"
 dotenv = "0.15.0"
 lnurl-rs = { version = "0.9.0", default-features = false }
 lightning-invoice = { version = "0.34.0", features = ["serde", "std"] }

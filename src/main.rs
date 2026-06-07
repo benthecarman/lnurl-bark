@@ -7,6 +7,7 @@ use axum::{http, Extension, Router};
 use clap::Parser;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgConnection;
+use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use log::{error, info, warn};
 use nostr::Keys;
 use std::str::FromStr;
@@ -23,6 +24,8 @@ mod barkd;
 mod config;
 mod models;
 mod routes;
+
+const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 
 #[derive(Clone)]
 pub struct State {
@@ -50,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
         .test_on_check_out(true)
         .build(manager)
         .expect("Unable to build DB connection pool");
+    run_migrations(&db_pool)?;
 
     let barkd = Arc::new(BarkdClient::new(
         config.barkd_url.clone(),
@@ -110,6 +114,13 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("shutdown error: {e}");
     }
 
+    Ok(())
+}
+
+fn run_migrations(pool: &Pool<ConnectionManager<PgConnection>>) -> anyhow::Result<()> {
+    let mut conn = pool.get().context("failed to get DB connection for migrations")?;
+    conn.run_pending_migrations(MIGRATIONS)
+        .map_err(|e| anyhow::anyhow!("failed to run database migrations: {e}"))?;
     Ok(())
 }
 
