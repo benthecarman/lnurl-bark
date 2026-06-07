@@ -1,4 +1,3 @@
-use bark::Config as BarkConfig;
 use bitcoin::Network;
 use clap::Parser;
 
@@ -38,29 +37,11 @@ pub struct Config {
     #[clap(default_value_t = String::from("localhost:3000"), long, env = "LNURL_DOMAIN")]
     pub domain: String,
 
-    /// BIP39 mnemonic for the Bark wallet that receives Lightning payments
-    #[clap(long, env = "LNURL_BARK_MNEMONIC")]
-    pub bark_mnemonic: String,
+    /// Base URL for the barkd REST API
+    #[clap(long, env = "LNURL_BARKD_URL")]
+    pub barkd_url: String,
 
-    /// SQLite database path for Bark wallet state
-    #[clap(default_value_t = String::from("./bark.sqlite"), long, env = "LNURL_BARK_DB_PATH")]
-    pub bark_db_path: String,
-
-    /// Ark server URL used by the Bark wallet
-    #[clap(long, env = "LNURL_BARK_SERVER")]
-    pub bark_server: String,
-
-    /// Esplora URL used by the Bark wallet
-    #[clap(long, env = "LNURL_BARK_ESPLORA")]
-    pub bark_esplora: Option<String>,
-}
-
-impl Config {
-    pub fn bark_config(&self) -> BarkConfig {
-        BarkConfig {
-            server_address: self.bark_server.clone(),
-            esplora_address: self.bark_esplora.clone(),
-            ..BarkConfig::network_default(self.network)
-        }
-    }
+    /// Bearer token for the barkd REST API
+    #[clap(long, env = "LNURL_BARKD_TOKEN")]
+    pub barkd_token: Option<String>,
 }

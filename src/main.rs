@@ -1,13 +1,9 @@
 use anyhow::Context;
+use ark::lightning::PaymentHash;
 use axum::extract::DefaultBodyLimit;
 use axum::http::Method;
 use axum::routing::{get, post};
 use axum::{http, Extension, Router};
-use bark::ark::lightning::PaymentHash;
-use bark::bip39::Mnemonic;
-use bark::lock_manager::memory::MemoryLockManager;
-use bark::persist::sqlite::SqliteClient;
-use bark::Wallet;
 use clap::Parser;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgConnection;
@@ -18,10 +14,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
 
+use crate::barkd::BarkdClient;
 use crate::config::*;
 use crate::models::invoice::{Invoice, InvoiceState};
 use crate::routes::*;
 
+mod barkd;
 mod config;
 mod models;
 mod routes;
@@ -30,7 +28,7 @@ mod routes;
 pub struct State {
     pub db_pool: Pool<ConnectionManager<PgConnection>>,
     pub keys: Keys,
-    pub wallet: Arc<Wallet>,
+    pub barkd: Arc<BarkdClient>,
 
     // -- config options --
     pub domain: String,
@@ -53,37 +51,15 @@ async fn main() -> anyhow::Result<()> {
         .build(manager)
         .expect("Unable to build DB connection pool");
 
-    let bark_mnemonic = Mnemonic::from_str(&config.bark_mnemonic)?;
-    let bark_config = config.bark_config();
-    let bark_db = Arc::new(SqliteClient::open(&config.bark_db_path)?);
-    let wallet = match Wallet::open(
-        &bark_mnemonic,
-        bark_db.clone(),
-        bark_config.clone(),
-        Box::new(MemoryLockManager::new()),
-    )
-    .await
-    {
-        Ok(wallet) => wallet,
-        Err(e) => {
-            warn!("Unable to open Bark wallet, creating a new one: {e}");
-            Wallet::create(
-                &bark_mnemonic,
-                config.network,
-                bark_config,
-                bark_db,
-                Box::new(MemoryLockManager::new()),
-                false,
-            )
-            .await?
-        }
-    };
-    let wallet = Arc::new(wallet);
+    let barkd = Arc::new(BarkdClient::new(
+        config.barkd_url.clone(),
+        config.barkd_token.clone(),
+    )?);
 
     let state = State {
         db_pool: db_pool.clone(),
         keys: keys.clone(),
-        wallet,
+        barkd,
         domain: config.domain,
         min_sendable: config.min_sendable,
         max_sendable: config.max_sendable,
@@ -168,15 +144,20 @@ async fn claim_invoice_if_paid(state: &State, invoice: Invoice) -> anyhow::Resul
     let payment_hash = PaymentHash::from(&bolt11);
 
     let receive = state
-        .wallet
-        .try_claim_lightning_receive(payment_hash, false, None)
+        .barkd
+        .receive_status(&payment_hash.to_string())
         .await
         .with_context(|| {
             format!(
-                "failed to claim lightning receive for invoice {}",
+                "failed to get lightning receive status for invoice {}",
                 invoice.id
             )
         })?;
+
+    let Some(receive) = receive else {
+        warn!("Barkd has no receive status for invoice {}", invoice.id);
+        return Ok(());
+    };
 
     if receive.finished_at.is_none() {
         return Ok(());

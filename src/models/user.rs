@@ -1,5 +1,5 @@
 use crate::models::schema::users;
-use bark::ark::Address;
+use ark::Address;
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;

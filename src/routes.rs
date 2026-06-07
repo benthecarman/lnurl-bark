@@ -6,7 +6,6 @@ use anyhow::anyhow;
 use axum::extract::{Path, Query};
 use axum::http::{StatusCode, Uri};
 use axum::{Extension, Json};
-use bitcoin::Amount;
 use diesel::Connection;
 use lightning_invoice::Bolt11Invoice;
 use lnurl::pay::PayResponse;
@@ -74,10 +73,10 @@ pub(crate) async fn get_invoice_impl(
     };
 
     let invoice = state
-        .wallet
-        .bolt11_invoice_for_address(
-            Amount::from_sat(amount_msats / 1_000),
-            ark_address,
+        .barkd
+        .invoice_for_address(
+            amount_msats / 1_000,
+            ark_address.to_string(),
             Some(_invoice_description),
         )
         .await?;
@@ -267,7 +266,7 @@ pub async fn register(
 
     let ark_address = req
         .ark_address
-        .parse::<bark::ark::Address>()
+        .parse::<ark::Address>()
         .map_err(|_| (StatusCode::BAD_REQUEST, "InvalidArkAddress".to_string()))?;
 
     // check if the user provided name is taken
