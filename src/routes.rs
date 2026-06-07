@@ -97,11 +97,11 @@ pub(crate) async fn get_invoice_impl(
             lnurlp_comment: params.comment,
             state: InvoiceState::Pending as i32,
         };
-        let _inserted_invoice = invoice.insert(conn)?;
+        let inserted_invoice = invoice.insert(conn)?;
 
         if let Some(zap_request) = zap_request {
             let zap = Zap {
-                id: 0,
+                id: inserted_invoice.id,
                 request: zap_request.as_json(),
                 event_id: None,
             };
