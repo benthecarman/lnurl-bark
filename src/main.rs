@@ -4,13 +4,14 @@ use axum::http::Method;
 use axum::middleware;
 use axum::routing::{get, post};
 use axum::{http, Extension, Router};
+use bark_rest_client::models::LightningReceiveInfo;
 use clap::Parser;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgConnection;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use log::{error, info, warn};
 use nostr::Keys;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -154,19 +155,15 @@ async fn claim_paid_invoices(state: State) {
 async fn claim_paid_invoices_once(state: &State) -> anyhow::Result<()> {
     let invoices = {
         let mut conn = state.db_pool.get()?;
-        let cancelled = Invoice::cancel_expired_pending(&mut conn)?;
-        if cancelled > 0 {
-            info!("Cancelled {cancelled} expired invoices");
-        }
         Invoice::get_by_state(&mut conn, InvoiceState::Pending as i32)?
     };
 
-    let bark_pending_hashes = match state.barkd.pending_receives().await {
+    let bark_pending_receives = match state.barkd.pending_receives().await {
         Ok(receives) => Some(
             receives
                 .into_iter()
-                .map(|receive| receive.payment_hash.to_string())
-                .collect::<HashSet<_>>(),
+                .map(|receive| (receive.payment_hash.to_string(), receive))
+                .collect::<HashMap<_, _>>(),
         ),
         Err(e) => {
             warn!(
@@ -177,19 +174,14 @@ async fn claim_paid_invoices_once(state: &State) -> anyhow::Result<()> {
     };
 
     for invoice in invoices {
-        if invoice_has_expired(&invoice) {
-            let mut conn = state.db_pool.get()?;
-            if invoice.mark_cancelled(&mut conn)? {
-                info!("Cancelled expired invoice {}", invoice.id);
-            }
-            continue;
-        }
-
         let payment_hash = invoice_payment_hash(&invoice);
-        if bark_pending_hashes
+        if let Some(receive) = bark_pending_receives
             .as_ref()
-            .is_some_and(|pending_hashes| pending_hashes.contains(&payment_hash))
+            .and_then(|pending_receives| pending_receives.get(&payment_hash))
         {
+            if let Err(e) = apply_invoice_receive_status(state, &invoice, &payment_hash, receive) {
+                error!("Unable to claim invoice: {e:#}");
+            }
             continue;
         }
 
@@ -238,9 +230,19 @@ async fn claim_invoice_if_paid(
 
     let Some(receive) = receive else {
         warn!("Barkd has no receive status for invoice {}", invoice.id);
+        cancel_invoice_if_expired(state, &invoice, &payment_hash)?;
         return Ok(());
     };
 
+    apply_invoice_receive_status(state, &invoice, &payment_hash, &receive)
+}
+
+fn apply_invoice_receive_status(
+    state: &State,
+    invoice: &Invoice,
+    payment_hash: &str,
+    receive: &LightningReceiveInfo,
+) -> anyhow::Result<()> {
     if receive.preimage_revealed_at.is_some() {
         info!(
             "Barkd receive ready to claim for invoice {} payment_hash={} \
@@ -264,6 +266,26 @@ async fn claim_invoice_if_paid(
             info!(
                 "Cancelled terminal unpaid invoice {} payment_hash={} finished_at={:?}",
                 invoice.id, payment_hash, receive.finished_at
+            );
+        }
+    }
+
+    cancel_invoice_if_expired(state, invoice, payment_hash)?;
+
+    Ok(())
+}
+
+fn cancel_invoice_if_expired(
+    state: &State,
+    invoice: &Invoice,
+    payment_hash: &str,
+) -> anyhow::Result<()> {
+    if invoice_has_expired(invoice) {
+        let mut conn = state.db_pool.get()?;
+        if invoice.mark_cancelled(&mut conn)? {
+            info!(
+                "Cancelled expired invoice {} payment_hash={} amount_msats={}",
+                invoice.id, payment_hash, invoice.amount_msats
             );
         }
     }

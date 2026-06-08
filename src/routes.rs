@@ -90,7 +90,9 @@ pub(crate) async fn get_invoice_impl(
         )
         .await?;
 
-    if !invoice.amount_milli_satoshis().is_some_and(|a| a == amount_msats)
+    if !invoice
+        .amount_milli_satoshis()
+        .is_some_and(|a| a == amount_msats)
     {
         return Err(anyhow!("Invoice amount mismatch"));
     }
