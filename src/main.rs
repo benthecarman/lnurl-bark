@@ -220,6 +220,11 @@ async fn claim_invoice_if_paid(
     invoice: Invoice,
     payment_hash: String,
 ) -> anyhow::Result<()> {
+    info!(
+        "Checking claim status for invoice {} payment_hash={} amount_msats={}",
+        invoice.id, payment_hash, invoice.amount_msats
+    );
+
     let receive = state
         .barkd
         .receive_status(&payment_hash)
@@ -237,9 +242,18 @@ async fn claim_invoice_if_paid(
     };
 
     if receive.preimage_revealed_at.is_some() {
+        info!(
+            "Barkd receive ready to claim for invoice {} payment_hash={} \
+             preimage_revealed_at={:?} finished_at={:?}",
+            invoice.id, payment_hash, receive.preimage_revealed_at, receive.finished_at
+        );
+
         let mut conn = state.db_pool.get()?;
         if invoice.mark_settled(&mut conn, receive.payment_preimage.to_string())? {
-            info!("Claimed and delivered invoice {}", invoice.id);
+            info!(
+                "Claimed invoice {} payment_hash={} amount_msats={} finished_at={:?}",
+                invoice.id, payment_hash, invoice.amount_msats, receive.finished_at
+            );
         }
         return Ok(());
     }
@@ -247,7 +261,10 @@ async fn claim_invoice_if_paid(
     if receive.finished_at.is_some() {
         let mut conn = state.db_pool.get()?;
         if invoice.mark_cancelled(&mut conn)? {
-            info!("Cancelled terminal unpaid invoice {}", invoice.id);
+            info!(
+                "Cancelled terminal unpaid invoice {} payment_hash={} finished_at={:?}",
+                invoice.id, payment_hash, receive.finished_at
+            );
         }
     }
 
