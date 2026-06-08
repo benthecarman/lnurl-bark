@@ -6,6 +6,7 @@ use anyhow::anyhow;
 use axum::extract::{Path, Query};
 use axum::http::{StatusCode, Uri};
 use axum::{Extension, Json};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use diesel::Connection;
 use lightning_invoice::Bolt11Invoice;
 use lnurl::pay::PayResponse;
@@ -16,6 +17,7 @@ use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use std::fmt::Display;
 use std::str::FromStr;
+use std::time::SystemTime;
 
 const MAX_NAME_LEN: usize = 64;
 const MAX_COMMENT_LEN: usize = 100;
@@ -94,14 +96,19 @@ pub(crate) async fn get_invoice_impl(
         return Err(anyhow!("Invoice amount mismatch"));
     }
 
+    let payment_hash = invoice.payment_hash().to_string();
+    let expires_at = invoice_expires_at(&invoice);
+
     conn.transaction::<_, anyhow::Error, _>(|conn| {
         let invoice = NewInvoice {
             user_id: user.id,
             bolt11: invoice.to_string(),
             amount_msats: amount_msats as i64,
+            payment_hash: Some(payment_hash),
             preimage: String::new(),
             lnurlp_comment: params.comment,
             state: InvoiceState::Pending as i32,
+            expires_at,
         };
         let inserted_invoice = invoice.insert(conn)?;
 
@@ -118,6 +125,12 @@ pub(crate) async fn get_invoice_impl(
     })?;
 
     Ok(invoice)
+}
+
+fn invoice_expires_at(invoice: &Bolt11Invoice) -> Option<NaiveDateTime> {
+    let expires_at = invoice.expires_at()?;
+    let expires_at = SystemTime::UNIX_EPOCH.checked_add(expires_at)?;
+    Some(DateTime::<Utc>::from(expires_at).naive_utc())
 }
 
 /// HTTP endpoint for generating Lightning invoices from a LNURL-pay request.

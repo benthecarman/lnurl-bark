@@ -159,6 +159,15 @@ Run the test suite:
 cargo test
 ```
 
+Database-backed migration/model tests are enabled when `LNURL_TEST_DATABASE_URL`
+points at a Postgres database the test process can create schemas in:
+
+```sh
+LNURL_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/lnurl_bark_test cargo test
+```
+
+These tests create and drop isolated temporary schemas inside that database.
+
 Format the code:
 
 ```sh

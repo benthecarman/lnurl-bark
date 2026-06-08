@@ -8,10 +8,15 @@ diesel::table! {
         bolt11 -> Varchar,
         amount_msats -> Int8,
         #[max_length = 64]
+        payment_hash -> Nullable<Varchar>,
+        #[max_length = 64]
         preimage -> Varchar,
         #[max_length = 100]
         lnurlp_comment -> Nullable<Varchar>,
         state -> Int4,
+        created_at -> Timestamp,
+        expires_at -> Nullable<Timestamp>,
+        settled_at -> Nullable<Timestamp>,
     }
 }
 

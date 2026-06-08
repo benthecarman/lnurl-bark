@@ -64,6 +64,13 @@ impl BarkdClient {
             Err(e) => Err(barkd_error(e).context("failed to get barkd receive status")),
         }
     }
+
+    pub async fn pending_receives(&self) -> anyhow::Result<Vec<LightningReceiveInfo>> {
+        lightning_api::list_receive_statuses(&self.config)
+            .await
+            .map_err(barkd_error)
+            .context("failed to list barkd receive statuses")
+    }
 }
 
 fn barkd_error<T: fmt::Debug>(err: bark_rest_client::apis::Error<T>) -> anyhow::Error {

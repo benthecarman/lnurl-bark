@@ -1,5 +1,4 @@
 use anyhow::Context;
-use ark::lightning::PaymentHash;
 use axum::extract::DefaultBodyLimit;
 use axum::http::Method;
 use axum::middleware;
@@ -11,6 +10,7 @@ use diesel::PgConnection;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use log::{error, info, warn};
 use nostr::Keys;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -154,11 +154,46 @@ async fn claim_paid_invoices(state: State) {
 async fn claim_paid_invoices_once(state: &State) -> anyhow::Result<()> {
     let invoices = {
         let mut conn = state.db_pool.get()?;
+        let cancelled = Invoice::cancel_expired_pending(&mut conn)?;
+        if cancelled > 0 {
+            info!("Cancelled {cancelled} expired invoices");
+        }
         Invoice::get_by_state(&mut conn, InvoiceState::Pending as i32)?
     };
 
+    let bark_pending_hashes = match state.barkd.pending_receives().await {
+        Ok(receives) => Some(
+            receives
+                .into_iter()
+                .map(|receive| receive.payment_hash.to_string())
+                .collect::<HashSet<_>>(),
+        ),
+        Err(e) => {
+            warn!(
+                "Unable to list pending barkd receives, falling back to per-invoice checks: {e:#}"
+            );
+            None
+        }
+    };
+
     for invoice in invoices {
-        if let Err(e) = claim_invoice_if_paid(state, invoice).await {
+        if invoice_has_expired(&invoice) {
+            let mut conn = state.db_pool.get()?;
+            if invoice.mark_cancelled(&mut conn)? {
+                info!("Cancelled expired invoice {}", invoice.id);
+            }
+            continue;
+        }
+
+        let payment_hash = invoice_payment_hash(&invoice);
+        if bark_pending_hashes
+            .as_ref()
+            .is_some_and(|pending_hashes| pending_hashes.contains(&payment_hash))
+        {
+            continue;
+        }
+
+        if let Err(e) = claim_invoice_if_paid(state, invoice, payment_hash).await {
             error!("Unable to claim invoice: {e:#}");
         }
     }
@@ -166,13 +201,28 @@ async fn claim_paid_invoices_once(state: &State) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn claim_invoice_if_paid(state: &State, invoice: Invoice) -> anyhow::Result<()> {
-    let bolt11 = invoice.bolt11();
-    let payment_hash = PaymentHash::from(&bolt11);
+fn invoice_has_expired(invoice: &Invoice) -> bool {
+    invoice
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= chrono::Utc::now().naive_utc())
+        || invoice.bolt11().is_expired()
+}
 
+fn invoice_payment_hash(invoice: &Invoice) -> String {
+    match invoice.payment_hash.as_deref() {
+        Some(payment_hash) => payment_hash.to_string(),
+        None => invoice.bolt11().payment_hash().to_string(),
+    }
+}
+
+async fn claim_invoice_if_paid(
+    state: &State,
+    invoice: Invoice,
+    payment_hash: String,
+) -> anyhow::Result<()> {
     let receive = state
         .barkd
-        .receive_status(&payment_hash.to_string())
+        .receive_status(&payment_hash)
         .await
         .with_context(|| {
             format!(
@@ -186,16 +236,198 @@ async fn claim_invoice_if_paid(state: &State, invoice: Invoice) -> anyhow::Resul
         return Ok(());
     };
 
-    if receive.finished_at.is_none() {
+    if receive.preimage_revealed_at.is_some() {
+        let mut conn = state.db_pool.get()?;
+        if invoice.mark_settled(&mut conn, receive.payment_preimage.to_string())? {
+            info!("Claimed and delivered invoice {}", invoice.id);
+        }
         return Ok(());
     }
 
-    {
+    if receive.finished_at.is_some() {
         let mut conn = state.db_pool.get()?;
-        invoice.set_state(&mut conn, InvoiceState::Settled as i32)?;
+        if invoice.mark_cancelled(&mut conn)? {
+            info!("Cancelled terminal unpaid invoice {}", invoice.id);
+        }
     }
 
-    info!("Claimed and delivered invoice {}", invoice.id);
-
     Ok(())
+}
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::models::invoice::NewInvoice;
+    use crate::models::user::NewUser;
+    use chrono::Duration as ChronoDuration;
+    use diesel::connection::SimpleConnection;
+    use diesel::prelude::*;
+    use diesel::sql_types::{BigInt, Text};
+    use std::env;
+
+    struct TestSchema {
+        database_url: String,
+        schema: String,
+    }
+
+    impl TestSchema {
+        fn new(test_name: &str) -> anyhow::Result<Option<(Self, PgConnection)>> {
+            dotenv::dotenv().ok();
+
+            let Ok(database_url) = env::var("LNURL_TEST_DATABASE_URL") else {
+                eprintln!("skipping {test_name}: LNURL_TEST_DATABASE_URL is not set");
+                return Ok(None);
+            };
+
+            let schema = format!(
+                "lnurl_bark_test_{}_{}_{}",
+                test_name,
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            );
+            let schema = schema.replace('-', "_");
+
+            let mut conn = PgConnection::establish(&database_url)?;
+            conn.batch_execute(&format!(
+                r#"CREATE SCHEMA "{schema}"; SET search_path TO "{schema}";"#
+            ))?;
+
+            Ok(Some((
+                Self {
+                    database_url,
+                    schema,
+                },
+                conn,
+            )))
+        }
+
+        fn set_search_path(&self, conn: &mut PgConnection) -> anyhow::Result<()> {
+            conn.batch_execute(&format!(r#"SET search_path TO "{}";"#, self.schema))?;
+            Ok(())
+        }
+    }
+
+    impl Drop for TestSchema {
+        fn drop(&mut self) {
+            if let Ok(mut conn) = PgConnection::establish(&self.database_url) {
+                let _ = conn.batch_execute(&format!(
+                    r#"DROP SCHEMA IF EXISTS "{}" CASCADE;"#,
+                    self.schema
+                ));
+            }
+        }
+    }
+
+    #[derive(QueryableByName)]
+    struct Count {
+        #[diesel(sql_type = BigInt)]
+        count: i64,
+    }
+
+    #[derive(QueryableByName)]
+    struct ColumnName {
+        #[diesel(sql_type = Text)]
+        column_name: String,
+    }
+
+    #[test]
+    fn embedded_migrations_apply_and_revert() -> anyhow::Result<()> {
+        let Some((schema, mut conn)) = TestSchema::new("migrations")? else {
+            return Ok(());
+        };
+
+        conn.run_pending_migrations(MIGRATIONS)
+            .map_err(|e| anyhow::anyhow!("failed to run migrations: {e}"))?;
+
+        let invoice_table_count: Count = diesel::sql_query(
+            "SELECT COUNT(*) AS count FROM information_schema.tables \
+             WHERE table_schema = current_schema() AND table_name = 'invoice'",
+        )
+        .get_result(&mut conn)?;
+        assert_eq!(invoice_table_count.count, 1);
+
+        let columns: Vec<ColumnName> = diesel::sql_query(
+            "SELECT column_name FROM information_schema.columns \
+             WHERE table_schema = current_schema() AND table_name = 'invoice'",
+        )
+        .load(&mut conn)?;
+        let columns = columns
+            .into_iter()
+            .map(|column| column.column_name)
+            .collect::<Vec<_>>();
+
+        for expected in ["payment_hash", "created_at", "expires_at", "settled_at"] {
+            assert!(
+                columns.iter().any(|column| column == expected),
+                "missing invoice.{expected} column"
+            );
+        }
+
+        conn.revert_all_migrations(MIGRATIONS)
+            .map_err(|e| anyhow::anyhow!("failed to revert migrations: {e}"))?;
+        schema.set_search_path(&mut conn)?;
+
+        let invoice_table_count: Count = diesel::sql_query(
+            "SELECT COUNT(*) AS count FROM information_schema.tables \
+             WHERE table_schema = current_schema() AND table_name = 'invoice'",
+        )
+        .get_result(&mut conn)?;
+        assert_eq!(invoice_table_count.count, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn invoice_model_uses_claim_columns() -> anyhow::Result<()> {
+        let Some((_schema, mut conn)) = TestSchema::new("invoice_model")? else {
+            return Ok(());
+        };
+
+        conn.run_pending_migrations(MIGRATIONS)
+            .map_err(|e| anyhow::anyhow!("failed to run migrations: {e}"))?;
+
+        let user = NewUser {
+            ark_address: "ark-test-address".to_string(),
+            name: "alice".to_string(),
+        }
+        .insert(&mut conn)?;
+
+        let expired_invoice = NewInvoice {
+            user_id: user.id,
+            bolt11: "lnbc1expired".to_string(),
+            amount_msats: 1_000,
+            payment_hash: Some("00".repeat(32)),
+            preimage: String::new(),
+            lnurlp_comment: None,
+            state: InvoiceState::Pending as i32,
+            expires_at: Some((chrono::Utc::now() - ChronoDuration::minutes(1)).naive_utc()),
+        }
+        .insert(&mut conn)?;
+
+        let active_invoice = NewInvoice {
+            user_id: user.id,
+            bolt11: "lnbc1active".to_string(),
+            amount_msats: 2_000,
+            payment_hash: Some("11".repeat(32)),
+            preimage: String::new(),
+            lnurlp_comment: Some("hi".to_string()),
+            state: InvoiceState::Pending as i32,
+            expires_at: Some((chrono::Utc::now() + ChronoDuration::minutes(5)).naive_utc()),
+        }
+        .insert(&mut conn)?;
+
+        assert!(expired_invoice.created_at <= chrono::Utc::now().naive_utc());
+        assert_eq!(Invoice::cancel_expired_pending(&mut conn)?, 1);
+
+        let expired_invoice = Invoice::get_by_id(&mut conn, expired_invoice.id)?.unwrap();
+        assert_eq!(expired_invoice.state, InvoiceState::Cancelled as i32);
+
+        assert!(active_invoice.mark_settled(&mut conn, "22".repeat(32))?);
+        let active_invoice = Invoice::get_by_id(&mut conn, active_invoice.id)?.unwrap();
+        assert_eq!(active_invoice.state, InvoiceState::Settled as i32);
+        assert_eq!(active_invoice.preimage, "22".repeat(32));
+        assert!(active_invoice.settled_at.is_some());
+
+        Ok(())
+    }
 }
