@@ -3,6 +3,7 @@ use bark_rest_client::apis::configuration::Configuration;
 use bark_rest_client::apis::lightning_api;
 use bark_rest_client::models::{LightningInvoiceForAddressRequest, LightningReceiveInfo};
 use lightning_invoice::Bolt11Invoice;
+use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -43,7 +44,7 @@ impl BarkdClient {
             },
         )
         .await
-        .map_err(|e| anyhow!(e))
+        .map_err(barkd_error)
         .context("failed to generate barkd invoice for Ark address")?;
 
         Bolt11Invoice::from_str(&info.invoice).context("barkd returned invalid BOLT11 invoice")
@@ -60,7 +61,19 @@ impl BarkdClient {
             {
                 Ok(None)
             }
-            Err(e) => Err(anyhow!(e).context("failed to get barkd receive status")),
+            Err(e) => Err(barkd_error(e).context("failed to get barkd receive status")),
         }
+    }
+}
+
+fn barkd_error<T: fmt::Debug>(err: bark_rest_client::apis::Error<T>) -> anyhow::Error {
+    match err {
+        bark_rest_client::apis::Error::ResponseError(resp) => anyhow!(
+            "barkd returned {}: body={}, parsed_error={:?}",
+            resp.status,
+            resp.content,
+            resp.entity
+        ),
+        err => anyhow!("{err}"),
     }
 }

@@ -136,6 +136,8 @@ pub async fn get_invoice(
     Query(params): Query<LnurlCallbackParams>,
     Extension(state): Extension<State>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let amount_msats = params.amount;
+
     match get_invoice_impl(&state, &name, params).await {
         Ok(invoice) => {
             // let payment_hash = hex::encode(invoice.payment_hash().to_byte_array());
@@ -147,7 +149,10 @@ pub async fn get_invoice(
                 "routes": [],
             })))
         }
-        Err(e) => Err(handle_anyhow_error(e)),
+        Err(e) => {
+            error!("Error generating invoice for name={name} amount_msats={amount_msats:?}: {e:#}");
+            Err(handle_anyhow_error(e))
+        }
     }
 }
 
