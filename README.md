@@ -149,7 +149,18 @@ Optional query parameters:
 - `comment`: LNURL-pay comment, up to 100 characters
 - `nostr`: serialized Nostr zap request event
 
-Successful responses include a BOLT11 invoice in the `pr` field.
+Successful responses include a BOLT11 invoice in the `pr` field and a `verify`
+URL for checking settlement status.
+
+### Verify Invoice
+
+```http
+GET /verify/:desc_hash/:payment_hash
+```
+
+Returns `settled: true` and the payment `preimage` once Bark has revealed the
+preimage for the invoice. Pending, expired, or cancelled invoices return
+`settled: false`.
 
 ## Development
 

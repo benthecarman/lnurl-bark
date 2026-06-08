@@ -1,4 +1,4 @@
-use crate::models::invoice::{InvoiceState, NewInvoice};
+use crate::models::invoice::{Invoice, InvoiceState, NewInvoice};
 use crate::models::user::{NewUser, User};
 use crate::models::zap::Zap;
 use crate::State;
@@ -6,9 +6,11 @@ use anyhow::anyhow;
 use axum::extract::{Path, Query};
 use axum::http::{StatusCode, Uri};
 use axum::{Extension, Json};
+use bitcoin::hashes::{sha256, Hash};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use diesel::Connection;
 use lightning_invoice::Bolt11Invoice;
+use lightning_invoice::Bolt11InvoiceDescriptionRef;
 use lnurl::pay::PayResponse;
 use lnurl::Tag;
 use log::error;
@@ -154,12 +156,13 @@ pub async fn get_invoice(
 
     match get_invoice_impl(&state, &name, params).await {
         Ok(invoice) => {
-            // let payment_hash = hex::encode(invoice.payment_hash().to_byte_array());
-            // let verify_url = format!("https://{}/verify/{name}/{payment_hash}", state.domain);
+            let desc_hash = invoice_description_hash(&invoice);
+            let payment_hash = invoice.payment_hash().to_string();
+            let verify_url = format!("https://{}/verify/{desc_hash}/{payment_hash}", state.domain);
             Ok(Json(json!({
                 "status": "OK",
                 "pr": invoice,
-                // "verify": verify_url,
+                "verify": verify_url,
                 "routes": [],
             })))
         }
@@ -172,6 +175,15 @@ pub async fn get_invoice(
 
 pub fn calc_metadata(name: &str, domain: &str) -> String {
     format!("[[\"text/identifier\",\"{name}@{domain}\"],[\"text/plain\",\"Sats for {name}\"]]",)
+}
+
+fn invoice_description_hash(invoice: &Bolt11Invoice) -> String {
+    match invoice.description() {
+        Bolt11InvoiceDescriptionRef::Direct(description) => {
+            sha256::Hash::hash(description.to_string().as_bytes()).to_string()
+        }
+        Bolt11InvoiceDescriptionRef::Hash(hash) => hex::encode(hash.0.to_byte_array()),
+    }
 }
 
 fn validate_amount_msats(
@@ -374,96 +386,139 @@ pub async fn register_route(
 /// # Returns
 /// A JSON response indicating settlement status and preimage (if settled), or an error response
 pub async fn verify(
-    Path((_desc_hash, _pay_hash)): Path<(String, String)>,
-    Extension(_state): Extension<State>,
+    Path((desc_hash, pay_hash)): Path<(String, String)>,
+    Extension(state): Extension<State>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    // todo implement
-    Err((
-        StatusCode::BAD_REQUEST,
+    validate_hex_hash(&desc_hash, "Invalid description hash")?;
+    validate_hex_hash(&pay_hash, "Invalid payment hash")?;
+
+    let mut invoice = find_invoice_by_payment_hash(&state, &pay_hash)?;
+
+    if invoice.state == InvoiceState::Pending as i32 {
+        refresh_invoice_receive_status(&state, &invoice, &pay_hash).await?;
+        invoice = find_invoice_by_payment_hash(&state, &pay_hash)?;
+    }
+
+    let bolt11 = invoice.bolt11();
+    if !invoice_description_hash(&bolt11).eq_ignore_ascii_case(&desc_hash) {
+        return Ok(Json(not_found_response()));
+    }
+
+    if invoice.state == InvoiceState::Settled as i32 && !invoice.preimage.is_empty() {
+        Ok(Json(json!({
+            "status": "OK",
+            "settled": true,
+            "preimage": invoice.preimage,
+            "pr": bolt11,
+        })))
+    } else {
+        Ok(Json(json!({
+            "status": "OK",
+            "settled": false,
+            "preimage": null,
+            "pr": bolt11,
+        })))
+    }
+}
+
+fn validate_hex_hash(hash: &str, reason: &str) -> Result<(), (StatusCode, Json<Value>)> {
+    if hash.len() == 64 && hex::decode(hash).is_ok_and(|bytes| bytes.len() == 32) {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "status": "ERROR",
+                "reason": reason,
+            })),
+        ))
+    }
+}
+
+fn find_invoice_by_payment_hash(
+    state: &State,
+    payment_hash: &str,
+) -> Result<Invoice, (StatusCode, Json<Value>)> {
+    let mut conn = state.db_pool.get().map_err(|e| {
+        error!("DB connection error: {e}");
+        server_error_response()
+    })?;
+
+    Invoice::get_by_payment_hash(&mut conn, payment_hash)
+        .map_err(|e| {
+            error!("Error looking up invoice for payment_hash={payment_hash}: {e:?}");
+            server_error_response()
+        })?
+        .ok_or_else(|| (StatusCode::OK, Json(not_found_response())))
+}
+
+async fn refresh_invoice_receive_status(
+    state: &State,
+    invoice: &Invoice,
+    payment_hash: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let receive = state
+        .barkd
+        .receive_status(payment_hash)
+        .await
+        .map_err(|e| {
+            error!("Error refreshing receive status for payment_hash={payment_hash}: {e:#}");
+            server_error_response()
+        })?;
+
+    let mut conn = state.db_pool.get().map_err(|e| {
+        error!("DB connection error: {e}");
+        server_error_response()
+    })?;
+
+    if let Some(receive) = receive {
+        if receive.preimage_revealed_at.is_some() {
+            invoice
+                .mark_settled(&mut conn, receive.payment_preimage.to_string())
+                .map_err(|e| {
+                    error!("Error marking invoice settled for payment_hash={payment_hash}: {e:?}");
+                    server_error_response()
+                })?;
+        } else if receive.finished_at.is_some() {
+            invoice.mark_cancelled(&mut conn).map_err(|e| {
+                error!("Error marking invoice cancelled for payment_hash={payment_hash}: {e:?}");
+                server_error_response()
+            })?;
+        }
+    } else if invoice_has_expired(invoice) {
+        invoice.mark_cancelled(&mut conn).map_err(|e| {
+            error!(
+                "Error marking expired invoice cancelled for payment_hash={payment_hash}: {e:?}"
+            );
+            server_error_response()
+        })?;
+    }
+
+    Ok(())
+}
+
+fn invoice_has_expired(invoice: &Invoice) -> bool {
+    invoice
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= chrono::Utc::now().naive_utc())
+        || invoice.bolt11().is_expired()
+}
+
+fn not_found_response() -> Value {
+    json!({
+        "status": "ERROR",
+        "reason": "Not found",
+    })
+}
+
+fn server_error_response() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
         Json(json!({
             "status": "ERROR",
-            "reason": "Invalid payment hash",
+            "reason": "Server error",
         })),
-    ))
-
-    // let mut lnd = state.lnd.clone();
-    //
-    // let desc_hash: Vec<u8> = hex::decode(desc_hash).map_err(|_| {
-    //     (
-    //         StatusCode::BAD_REQUEST,
-    //         Json(json!({
-    //             "status": "ERROR",
-    //             "reason": "Invalid description hash",
-    //         })),
-    //     )
-    // })?;
-    //
-    // let pay_hash: Vec<u8> = hex::decode(pay_hash).map_err(|_| {
-    //     (
-    //         StatusCode::BAD_REQUEST,
-    //         Json(json!({
-    //             "status": "ERROR",
-    //             "reason": "Invalid payment hash",
-    //         })),
-    //     )
-    // })?;
-    //
-    // let request = lnrpc::PaymentHash {
-    //     r_hash: pay_hash.to_vec(),
-    //     ..Default::default()
-    // };
-    //
-    // let resp = match lnd.lookup_invoice(request).await {
-    //     Ok(resp) => resp.into_inner(),
-    //     Err(_) => {
-    //         return Ok(Json(json!({
-    //             "status": "ERROR",
-    //             "reason": "Not found",
-    //         })));
-    //     }
-    // };
-    //
-    // let invoice = Bolt11Invoice::from_str(&resp.payment_request).map_err(|_| {
-    //     (
-    //         StatusCode::OK,
-    //         Json(json!({
-    //             "status": "ERROR",
-    //             "reason": "Not found",
-    //         })),
-    //     )
-    // })?;
-    //
-    // match invoice.description() {
-    //     Bolt11InvoiceDescriptionRef::Direct(_) => Ok(Json(json!({
-    //         "status": "ERROR",
-    //         "reason": "Not found",
-    //     }))),
-    //     Bolt11InvoiceDescriptionRef::Hash(h) => {
-    //         if h.0.to_byte_array().to_vec() == desc_hash {
-    //             if resp.state() == InvoiceState::Settled && !resp.r_preimage.is_empty() {
-    //                 let preimage = hex::encode(resp.r_preimage);
-    //                 Ok(Json(json!({
-    //                     "status": "OK",
-    //                     "settled": true,
-    //                     "preimage": preimage,
-    //                     "pr": invoice,
-    //                 })))
-    //             } else {
-    //                 Ok(Json(json!({
-    //                     "status": "OK",
-    //                     "settled": false,
-    //                     "preimage": (),
-    //                     "pr": invoice,
-    //                 })))
-    //             }
-    //         } else {
-    //             Ok(Json(json!({
-    //                 "status": "ERROR",
-    //                 "reason": "Not found",
-    //             })))
-    //         }
-    //     }
-    // }
+    )
 }
 
 /// Utility function for converting anyhow errors to HTTP response format.

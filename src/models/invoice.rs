@@ -40,6 +40,16 @@ impl Invoice {
             .optional()?)
     }
 
+    pub fn get_by_payment_hash(
+        conn: &mut PgConnection,
+        payment_hash: &str,
+    ) -> anyhow::Result<Option<Invoice>> {
+        Ok(invoice::table
+            .filter(invoice::payment_hash.eq(payment_hash))
+            .first::<Invoice>(conn)
+            .optional()?)
+    }
+
     pub fn get_by_state(conn: &mut PgConnection, state: i32) -> anyhow::Result<Vec<Invoice>> {
         Ok(invoice::table
             .filter(invoice::state.eq(state))
