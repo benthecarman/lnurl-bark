@@ -2,6 +2,7 @@ use anyhow::Context;
 use ark::lightning::PaymentHash;
 use axum::extract::DefaultBodyLimit;
 use axum::http::Method;
+use axum::middleware;
 use axum::routing::{get, post};
 use axum::{http, Extension, Router};
 use clap::Parser;
@@ -10,19 +11,23 @@ use diesel::PgConnection;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use log::{error, info, warn};
 use nostr::Keys;
+use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::timeout::TimeoutLayer;
 
 use crate::barkd::BarkdClient;
 use crate::config::*;
 use crate::models::invoice::{Invoice, InvoiceState};
+use crate::rate_limit::{rate_limit_middleware, RateLimiter};
 use crate::routes::*;
 
 mod barkd;
 mod config;
 mod models;
+mod rate_limit;
 mod routes;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
@@ -59,6 +64,9 @@ async fn main() -> anyhow::Result<()> {
         config.barkd_url.clone(),
         config.barkd_token.clone(),
     )?);
+    let rate_limiter = Arc::new(RateLimiter::new(config.rate_limit_per_minute));
+    let request_timeout = Duration::from_secs(config.request_timeout_seconds);
+    let max_request_body_bytes = config.max_request_body_bytes;
 
     let state = State {
         db_pool: db_pool.clone(),
@@ -85,6 +93,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/register", post(register_route))
         .fallback(fallback)
         .layer(Extension(state.clone()))
+        .layer(middleware::from_fn_with_state(
+            rate_limiter,
+            rate_limit_middleware,
+        ))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -97,9 +109,11 @@ async fn main() -> anyhow::Result<()> {
                     Method::OPTIONS,
                 ]),
         )
-        .layer(DefaultBodyLimit::max(1_000_000)); // max 1mb body size
+        .layer(TimeoutLayer::new(request_timeout))
+        .layer(DefaultBodyLimit::max(max_request_body_bytes));
 
-    let server = axum::Server::bind(&addr).serve(server_router.into_make_service());
+    let server = axum::Server::bind(&addr)
+        .serve(server_router.into_make_service_with_connect_info::<SocketAddr>());
 
     // todo Invoice event stream for zaps
 
@@ -118,7 +132,9 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn run_migrations(pool: &Pool<ConnectionManager<PgConnection>>) -> anyhow::Result<()> {
-    let mut conn = pool.get().context("failed to get DB connection for migrations")?;
+    let mut conn = pool
+        .get()
+        .context("failed to get DB connection for migrations")?;
     conn.run_pending_migrations(MIGRATIONS)
         .map_err(|e| anyhow::anyhow!("failed to run database migrations: {e}"))?;
     Ok(())

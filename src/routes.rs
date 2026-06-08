@@ -17,6 +17,10 @@ use serde_json::{json, Value};
 use std::fmt::Display;
 use std::str::FromStr;
 
+const MAX_NAME_LEN: usize = 64;
+const MAX_COMMENT_LEN: usize = 100;
+const MAX_NOSTR_PARAM_LEN: usize = 16 * 1024;
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LnurlCallbackParams {
@@ -44,6 +48,9 @@ pub(crate) async fn get_invoice_impl(
     name: &str,
     params: LnurlCallbackParams,
 ) -> anyhow::Result<Bolt11Invoice> {
+    validate_name(name)?;
+    validate_callback_params(&params)?;
+
     if params.amount.is_none() {
         return Err(anyhow!("Missing amount parameter"));
     }
@@ -163,6 +170,45 @@ fn validate_amount_msats(
     Ok(())
 }
 
+fn validate_callback_params(params: &LnurlCallbackParams) -> anyhow::Result<()> {
+    if params
+        .comment
+        .as_ref()
+        .is_some_and(|comment| comment.chars().count() > MAX_COMMENT_LEN)
+    {
+        return Err(anyhow!("Comment is too long"));
+    }
+
+    if params
+        .nostr
+        .as_ref()
+        .is_some_and(|nostr| nostr.len() > MAX_NOSTR_PARAM_LEN)
+    {
+        return Err(anyhow!("Nostr parameter is too large"));
+    }
+
+    Ok(())
+}
+
+fn validate_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty() {
+        return Err(anyhow!("Name parameter is required"));
+    }
+
+    if name.len() > MAX_NAME_LEN {
+        return Err(anyhow!("Name parameter is too long"));
+    }
+
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+    {
+        return Err(anyhow!("Name parameter contains invalid characters"));
+    }
+
+    Ok(())
+}
+
 /// HTTP endpoint that provides the LNURL-pay metadata and parameters.
 ///
 /// This is the entry point for the LNURL-pay protocol, served at the .well-known/lnurlp/{name} path.
@@ -177,14 +223,8 @@ pub async fn get_lnurl_pay(
     Path(name): Path<String>,
     Extension(state): Extension<State>,
 ) -> Result<Json<PayResponse>, (StatusCode, Json<Value>)> {
-    if name.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "status": "ERROR",
-                "reason": "Name parameter is required",
-            })),
-        ));
+    if let Err(e) = validate_name(&name) {
+        return Err(handle_anyhow_error(e));
     }
 
     let mut conn = state.db_pool.get().map_err(|e| {
@@ -259,15 +299,17 @@ pub async fn register(
     state: &State,
     req: RegisterRequest,
 ) -> Result<RegisterResponse, (StatusCode, String)> {
-    let mut conn = state.db_pool.get().map_err(|e| {
-        error!("DB connection error: {e}");
-        (StatusCode::INTERNAL_SERVER_ERROR, "ServerError".to_string())
-    })?;
+    validate_name(&req.name).map_err(|_| (StatusCode::BAD_REQUEST, "InvalidName".to_string()))?;
 
     let ark_address = req
         .ark_address
         .parse::<ark::Address>()
         .map_err(|_| (StatusCode::BAD_REQUEST, "InvalidArkAddress".to_string()))?;
+
+    let mut conn = state.db_pool.get().map_err(|e| {
+        error!("DB connection error: {e}");
+        (StatusCode::INTERNAL_SERVER_ERROR, "ServerError".to_string())
+    })?;
 
     // check if the user provided name is taken
     match User::get_by_name(&mut conn, &req.name) {
@@ -473,6 +515,45 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "Bark invoices must be denominated in whole sats"
+        );
+    }
+
+    #[test]
+    fn name_validation_rejects_empty_long_or_invalid_names() {
+        assert_eq!(
+            validate_name("").unwrap_err().to_string(),
+            "Name parameter is required"
+        );
+        assert_eq!(
+            validate_name(&"a".repeat(MAX_NAME_LEN + 1))
+                .unwrap_err()
+                .to_string(),
+            "Name parameter is too long"
+        );
+        assert_eq!(
+            validate_name("alice/bob").unwrap_err().to_string(),
+            "Name parameter contains invalid characters"
+        );
+    }
+
+    #[test]
+    fn callback_validation_rejects_oversized_inputs() {
+        let params = LnurlCallbackParams {
+            comment: Some("a".repeat(MAX_COMMENT_LEN + 1)),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_callback_params(&params).unwrap_err().to_string(),
+            "Comment is too long"
+        );
+
+        let params = LnurlCallbackParams {
+            nostr: Some("a".repeat(MAX_NOSTR_PARAM_LEN + 1)),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_callback_params(&params).unwrap_err().to_string(),
+            "Nostr parameter is too large"
         );
     }
 

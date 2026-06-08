@@ -33,6 +33,18 @@ pub struct Config {
     #[clap(default_value_t = 11_000_000_000, long, env = "LNURL_MAX_SENDABLE")]
     pub max_sendable: u64,
 
+    /// Maximum requests accepted from each source IP per minute
+    #[clap(default_value_t = 120, long, env = "LNURL_RATE_LIMIT_PER_MINUTE")]
+    pub rate_limit_per_minute: u32,
+
+    /// Maximum HTTP request body size in bytes
+    #[clap(default_value_t = 16_384, long, env = "LNURL_MAX_REQUEST_BODY_BYTES")]
+    pub max_request_body_bytes: usize,
+
+    /// Maximum time spent handling an HTTP request in seconds
+    #[clap(default_value_t = 10, long, env = "LNURL_REQUEST_TIMEOUT_SECONDS")]
+    pub request_timeout_seconds: u64,
+
     /// The domain name you are running lnurl-server on
     #[clap(default_value_t = String::from("localhost:3000"), long, env = "LNURL_DOMAIN")]
     pub domain: String,
