@@ -1,5 +1,6 @@
 use crate::models::schema::users;
 use ark::Address;
+use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -14,6 +15,7 @@ pub struct User {
     pub ark_address: String,
     pub name: String,
     pub disabled_zaps: bool,
+    pub activated_at: Option<NaiveDateTime>,
 }
 
 impl User {
@@ -35,6 +37,14 @@ impl User {
     pub fn get_by_name(conn: &mut PgConnection, name: &str) -> anyhow::Result<Option<User>> {
         Ok(users::table
             .filter(users::name.eq(name))
+            .first::<User>(conn)
+            .optional()?)
+    }
+
+    pub fn get_active_by_name(conn: &mut PgConnection, name: &str) -> anyhow::Result<Option<User>> {
+        Ok(users::table
+            .filter(users::name.eq(name))
+            .filter(users::activated_at.is_not_null())
             .first::<User>(conn)
             .optional()?)
     }
@@ -65,6 +75,10 @@ impl User {
 
         Ok(())
     }
+
+    pub fn delete_by_id(conn: &mut PgConnection, user_id: i32) -> anyhow::Result<usize> {
+        Ok(diesel::delete(users::table.filter(users::id.eq(user_id))).execute(conn)?)
+    }
 }
 
 #[derive(Insertable)]
@@ -72,6 +86,7 @@ impl User {
 pub struct NewUser {
     pub ark_address: String,
     pub name: String,
+    pub activated_at: Option<NaiveDateTime>,
 }
 
 impl NewUser {

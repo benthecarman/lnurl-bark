@@ -13,8 +13,8 @@ name = "lnurl-bark"
 path = "src/main.rs"
 
 [dependencies]
-ark-lib = { git = "https://gitlab.com/benthecarman/bark.git", branch = "lightning-receive-for-offline-user" }
-bark-rest-client = { git = "https://gitlab.com/benthecarman/bark.git", branch = "lightning-receive-for-offline-user" }
+ark-lib = { git = "https://gitlab.com/benthecarman/bark.git", rev = "276da0603372f8d5704cd2dcfd757af727d3b400" }
+bark-rest-client = { git = "https://gitlab.com/benthecarman/bark.git", rev = "276da0603372f8d5704cd2dcfd757af727d3b400" }
 
 anyhow = "1.0"
 axum = "0.6.20"

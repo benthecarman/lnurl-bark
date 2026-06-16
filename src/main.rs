@@ -21,6 +21,7 @@ use tower_http::timeout::TimeoutLayer;
 
 use crate::barkd::BarkdClient;
 use crate::config::*;
+use crate::models::custom_address_purchase::CustomAddressPurchase;
 use crate::models::invoice::{Invoice, InvoiceState};
 use crate::rate_limit::{rate_limit_middleware, RateLimiter};
 use crate::routes::*;
@@ -43,6 +44,7 @@ pub struct State {
     pub domain: String,
     pub min_sendable: u64,
     pub max_sendable: u64,
+    pub custom_address_fee_sats: u64,
 }
 
 #[tokio::main]
@@ -50,6 +52,9 @@ async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
     pretty_env_logger::try_init()?;
     let config: Config = Config::parse();
+    if config.custom_address_fee_sats == 0 {
+        anyhow::bail!("custom address fee must be greater than zero");
+    }
 
     let keys = Keys::from_str(&config.nsec)?;
 
@@ -76,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
         domain: config.domain,
         min_sendable: config.min_sendable,
         max_sendable: config.max_sendable,
+        custom_address_fee_sats: config.custom_address_fee_sats,
     };
 
     tokio::spawn(claim_paid_invoices(state.clone()));
@@ -91,6 +97,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/get-invoice/:hash", get(get_invoice))
         .route("/verify/:desc_hash/:pay_hash", get(verify))
         .route("/.well-known/lnurlp/:name", get(get_lnurl_pay))
+        .route("/v1/register/quote", get(register_quote_route))
+        .route(
+            "/v1/register/verify/:payment_hash",
+            get(register_status_route),
+        )
         .route("/v1/register", post(register_route))
         .fallback(fallback)
         .layer(Extension(state.clone()))
@@ -252,6 +263,15 @@ fn apply_invoice_receive_status(
 
         let mut conn = state.db_pool.get()?;
         if invoice.mark_settled(&mut conn, receive.payment_preimage.to_string())? {
+            if let Some(purchase) =
+                CustomAddressPurchase::activate_for_invoice(&mut conn, invoice.id)?
+            {
+                info!(
+                    "Activated custom Lightning address {}@{} for invoice {}",
+                    purchase.name, state.domain, invoice.id
+                );
+            }
+
             info!(
                 "Claimed invoice {} payment_hash={} amount_msats={} finished_at={:?}",
                 invoice.id, payment_hash, invoice.amount_msats, receive.finished_at
@@ -402,6 +422,25 @@ mod db_tests {
             );
         }
 
+        let user_columns: Vec<ColumnName> = diesel::sql_query(
+            "SELECT column_name FROM information_schema.columns \
+             WHERE table_schema = current_schema() AND table_name = 'users'",
+        )
+        .load(&mut conn)?;
+        assert!(
+            user_columns
+                .iter()
+                .any(|column| column.column_name == "activated_at"),
+            "missing users.activated_at column"
+        );
+
+        let purchase_table_count: Count = diesel::sql_query(
+            "SELECT COUNT(*) AS count FROM information_schema.tables \
+             WHERE table_schema = current_schema() AND table_name = 'custom_address_purchases'",
+        )
+        .get_result(&mut conn)?;
+        assert_eq!(purchase_table_count.count, 1);
+
         conn.revert_all_migrations(MIGRATIONS)
             .map_err(|e| anyhow::anyhow!("failed to revert migrations: {e}"))?;
         schema.set_search_path(&mut conn)?;
@@ -428,6 +467,7 @@ mod db_tests {
         let user = NewUser {
             ark_address: "ark-test-address".to_string(),
             name: "alice".to_string(),
+            activated_at: Some(chrono::Utc::now().naive_utc()),
         }
         .insert(&mut conn)?;
 

@@ -1,6 +1,22 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    custom_address_purchases (invoice_id) {
+        invoice_id -> Int4,
+        user_id -> Int4,
+        #[max_length = 255]
+        name -> Varchar,
+        ark_address -> Text,
+        auth_message -> Text,
+        #[max_length = 128]
+        signature -> Varchar,
+        fee_msats -> Int8,
+        created_at -> Timestamp,
+        activated_at -> Nullable<Timestamp>,
+    }
+}
+
+diesel::table! {
     invoice (id) {
         id -> Int4,
         user_id -> Int4,
@@ -27,6 +43,7 @@ diesel::table! {
         #[max_length = 255]
         name -> Varchar,
         disabled_zaps -> Bool,
+        activated_at -> Nullable<Timestamp>,
     }
 }
 
@@ -39,7 +56,9 @@ diesel::table! {
     }
 }
 
+diesel::joinable!(custom_address_purchases -> invoice (invoice_id));
+diesel::joinable!(custom_address_purchases -> users (user_id));
 diesel::joinable!(invoice -> users (user_id));
 diesel::joinable!(zaps -> invoice (id));
 
-diesel::allow_tables_to_appear_in_same_query!(invoice, users, zaps,);
+diesel::allow_tables_to_appear_in_same_query!(custom_address_purchases, invoice, users, zaps,);

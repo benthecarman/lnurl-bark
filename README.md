@@ -11,7 +11,7 @@ then periodically checks `barkd` for paid invoices and marks them settled.
 
 - LNURL-pay metadata at `/.well-known/lnurlp/:name`
 - Invoice generation at `/get-invoice/:name`
-- User registration at `/v1/register`
+- Paid custom Lightning address registration at `/v1/register`
 - Optional Nostr zap request storage
 - Postgres persistence through Diesel migrations
 - `barkd` REST API integration
@@ -46,6 +46,7 @@ local `.env` file on startup.
 | `LNURL_NETWORK` | no | `bitcoin` | Bitcoin network |
 | `LNURL_MIN_SENDABLE` | no | `1000` | Minimum LNURL amount in millisatoshis |
 | `LNURL_MAX_SENDABLE` | no | `11000000000` | Maximum LNURL amount in millisatoshis |
+| `LNURL_CUSTOM_ADDRESS_FEE_SATS` | no | `10000` | Fee for each custom Lightning address |
 | `LNURL_DOMAIN` | no | `localhost:3000` | Public domain used in LNURL callbacks and Lightning addresses |
 
 Example `.env`:
@@ -74,7 +75,8 @@ createdb lnurl_bark
 diesel migration run
 ```
 
-The migrations create `users`, `invoice`, and `zaps` tables.
+The migrations create `users`, `invoice`, `custom_address_purchases`, and
+`zaps` tables.
 
 ## Running
 
@@ -111,7 +113,16 @@ Returns a simple health response:
 }
 ```
 
-### Register User
+### Quote Custom Address Registration
+
+```http
+GET /v1/register/quote?name=alice&arkAddress=ark...
+```
+
+Returns the fee and the exact message the Bark wallet must sign. The message
+commits to the domain, requested name, and Ark address.
+
+### Register Custom Address
 
 ```http
 POST /v1/register
@@ -119,12 +130,28 @@ Content-Type: application/json
 
 {
   "name": "alice",
-  "ark_address": "ark..."
+  "arkAddress": "ark...",
+  "signature": "<hex schnorr signature>"
 }
 ```
 
-The registered user can receive payments at the Lightning address
+The signature must be produced by the Ark address in the request. A successful
+response returns a Bark wallet Lightning invoice in `pr`. Once that invoice is
+paid and settled, the name is activated for life and can receive at
 `alice@example.com` when `LNURL_DOMAIN=example.com`.
+
+Paid owners can register additional names for the same Ark address. Each new
+name is charged the full `LNURL_CUSTOM_ADDRESS_FEE_SATS` price and does not
+replace any existing active name.
+
+### Verify Custom Address Registration
+
+```http
+GET /v1/register/verify/:payment_hash
+```
+
+Checks the registration fee invoice and activates the custom address once Bark
+reports the invoice settled.
 
 ### LNURL-Pay Metadata
 

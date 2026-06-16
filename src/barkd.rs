@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Context};
 use bark_rest_client::apis::configuration::Configuration;
 use bark_rest_client::apis::lightning_api;
-use bark_rest_client::models::{LightningInvoiceForAddressRequest, LightningReceiveInfo};
+use bark_rest_client::models::{
+    LightningInvoiceForAddressRequest, LightningInvoiceRequest, LightningReceiveInfo,
+};
 use lightning_invoice::Bolt11Invoice;
 use std::fmt;
 use std::str::FromStr;
@@ -46,6 +48,25 @@ impl BarkdClient {
         .await
         .map_err(barkd_error)
         .context("failed to generate barkd invoice for Ark address")?;
+
+        Bolt11Invoice::from_str(&info.invoice).context("barkd returned invalid BOLT11 invoice")
+    }
+
+    pub async fn wallet_invoice(
+        &self,
+        amount_sat: u64,
+        description: Option<String>,
+    ) -> anyhow::Result<Bolt11Invoice> {
+        let info = lightning_api::generate_invoice(
+            &self.config,
+            LightningInvoiceRequest {
+                amount_sat,
+                description,
+            },
+        )
+        .await
+        .map_err(barkd_error)
+        .context("failed to generate barkd wallet invoice")?;
 
         Bolt11Invoice::from_str(&info.invoice).context("barkd returned invalid BOLT11 invoice")
     }

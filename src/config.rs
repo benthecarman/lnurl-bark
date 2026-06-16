@@ -33,6 +33,10 @@ pub struct Config {
     #[clap(default_value_t = 11_000_000_000, long, env = "LNURL_MAX_SENDABLE")]
     pub max_sendable: u64,
 
+    /// Fee charged for each paid custom Lightning address, in sats
+    #[clap(default_value_t = 10_000, long, env = "LNURL_CUSTOM_ADDRESS_FEE_SATS")]
+    pub custom_address_fee_sats: u64,
+
     /// Maximum requests accepted from each source IP per minute
     #[clap(default_value_t = 120, long, env = "LNURL_RATE_LIMIT_PER_MINUTE")]
     pub rate_limit_per_minute: u32,
